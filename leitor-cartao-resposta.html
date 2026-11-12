@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b1220">
+<title>Leitor de cartão-resposta</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0b1220;
+    --ink: #f3f6fb;
+    --muted: #9fb0c8;
+    --mark: #4da3ff;
+    --ok: #5fd39a;
+    --err: #ff7b72;
+    --shade: rgba(6, 10, 18, .62);
+    /* proporção do cartão (A4 retrato) */
+    --frame-w: min(86vw, 62vh);
+    --frame-h: calc(var(--frame-w) * 1.414);
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  *, *::before, *::after { box-sizing: inherit; }
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--ink);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+
+  .app { position: relative; height: 100%; }
+  #video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #000; }
+  #canvas { display: none; }
+
+  /* Overlay: máscara translúcida com recorte central */
+  .overlay { position: absolute; inset: 0; pointer-events: none; display: grid; place-items: center; }
+  .frame { position: relative; width: var(--frame-w); height: min(var(--frame-h), 68vh);
+    box-shadow: 0 0 0 100vmax var(--shade); }
+  .corner { position: absolute; width: 36px; height: 36px; border: 0 solid var(--mark); }
+  .tl { top: -3px; left: -3px; border-top-width: 4px; border-left-width: 4px; border-top-left-radius: 10px; }
+  .tr { top: -3px; right: -3px; border-top-width: 4px; border-right-width: 4px; border-top-right-radius: 10px; }
+  .bl { bottom: -3px; left: -3px; border-bottom-width: 4px; border-left-width: 4px; border-bottom-left-radius: 10px; }
+  .br { bottom: -3px; right: -3px; border-bottom-width: 4px; border-right-width: 4px; border-bottom-right-radius: 10px; }
+
+  .top, .bottom { position: absolute; left: 0; right: 0; display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 16px; }
+  .top { top: env(safe-area-inset-top, 0px); }
+  .bottom { bottom: env(safe-area-inset-bottom, 0px); padding-bottom: 24px; }
+
+  .hint { margin: 0; padding: 8px 14px; border-radius: 999px; background: var(--shade); font-size: .95rem; text-align: center; }
+  .status { display: inline-flex; align-items: center; gap: 8px; font-size: .8rem; color: var(--muted);
+    padding: 6px 12px; border-radius: 999px; background: var(--shade); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .status.loading .dot { animation: pulse 1s infinite alternate; background: var(--mark); }
+  .status.ready .dot { background: var(--ok); }
+  .status.error .dot { background: var(--err); }
+  @keyframes pulse { to { opacity: .25; } }
+
+  #scan { appearance: none; border: 0; cursor: pointer; min-width: 180px; height: 56px; padding: 0 32px;
+    border-radius: 28px; background: var(--mark); color: #05101f; font-size: 1.1rem; font-weight: 700; }
+  #scan:active { transform: scale(.97); }
+  #scan:disabled { background: #34425a; color: var(--muted); cursor: not-allowed; }
+  #scan:focus-visible { outline: 3px solid var(--ink); outline-offset: 3px; }
+
+  /* Mensagem de erro / permissão */
+  .msg { position: absolute; inset: 0; display: none; place-content: center; text-align: center; gap: 12px; padding: 32px; background: var(--bg); }
+  .msg.show { display: grid; }
+  .msg h1 { margin: 0; font-size: 1.3rem; }
+  .msg p { margin: 0; color: var(--muted); max-width: 32ch; margin-inline: auto; }
+
+  /* Prévia da captura */
+  .preview { position: absolute; inset: 0; display: none; flex-direction: column; background: var(--bg); }
+  .preview.show { display: flex; }
+  .preview img { flex: 1; min-height: 0; object-fit: contain; width: 100%; }
+  .preview .bar { display: flex; justify-content: center; gap: 12px; padding: 16px 16px 24px; }
+  .btn2 { appearance: none; border: 1px solid #34425a; background: transparent; color: var(--ink); height: 48px; padding: 0 24px; border-radius: 24px; font-size: 1rem; cursor: pointer; }
+
+  .result { margin: 0; max-height: 40%; overflow: auto; padding: 12px 16px; background: #0f1a2e; color: var(--ok);
+    font: .8rem/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; border-top: 1px solid #34425a; white-space: pre; }
+  .result.err { color: var(--err); white-space: pre-wrap; }
+
+  .btn2.small { height: 36px; padding: 0 16px; font-size: .85rem; background: var(--shade); }
+  .setup { position: absolute; inset: 0; display: none; overflow-y: auto; padding: 24px; background: rgba(11, 18, 32, .94); }
+  .setup.show { display: grid; }
+  .setup .box { width: min(88vw, 320px); display: grid; gap: 18px; margin: auto; }
+
+  /* Relatório de auditoria */
+  .preview { overflow-y: auto; }
+  .preview img { flex: none; height: 44vh; background: #05080f; }
+  .preview .bar { position: sticky; bottom: 0; background: var(--bg); flex: none; }
+  .report { flex: none; padding: 16px; display: grid; gap: 16px; --warn: #ffaa3c; --gray: #8a97ab; }
+  .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .card { display: grid; gap: 2px; padding: 12px 8px; border-radius: 12px; border: 1px solid; text-align: center; }
+  .card strong { font-size: 1.8rem; line-height: 1; }
+  .card span { font-size: .75rem; }
+  .card.clara { background: rgba(95, 211, 154, .14); border-color: var(--ok); color: var(--ok); }
+  .card.dupla { background: rgba(255, 170, 60, .14); border-color: var(--warn); color: var(--warn); }
+  .card.branco { background: rgba(138, 151, 171, .14); border-color: var(--gray); color: var(--gray); }
+  .errbox { grid-column: 1 / -1; margin: 0; padding: 12px; border-radius: 12px; background: rgba(255, 123, 114, .12); color: var(--err); }
+  .rows { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  .row { padding: 10px 12px; border-radius: 12px; background: #0f1a2e; border-left: 4px solid var(--gray); }
+  .row.clara { border-left-color: var(--ok); }
+  .row.dupla { border-left-color: var(--warn); }
+  .qhead { display: flex; justify-content: space-between; font-weight: 600; margin-bottom: 6px; }
+  .row.clara .qa { color: var(--ok); }
+  .row.dupla .qa { color: var(--warn); }
+  .row.branco .qa { color: var(--gray); }
+  .brow { display: grid; grid-template-columns: 16px 1fr 38px; align-items: center; gap: 8px; margin-top: 4px; font-size: .8rem; color: var(--muted); }
+  .track { position: relative; height: 10px; border-radius: 5px; background: #1a2740; overflow: hidden; }
+  .track::after { content: ""; position: absolute; top: 0; bottom: 0; left: var(--min, 20%); width: 1px; background: rgba(255, 255, 255, .4); }
+  .fillbar { height: 100%; border-radius: 5px; background: #4a5b78; }
+  .fillbar.win { background: var(--ok); }
+  .fillbar.warn { background: var(--warn); }
+  .pct { text-align: right; }
+  .raw summary { cursor: pointer; color: var(--muted); font-size: .85rem; }
+  .raw .result { margin-top: 8px; max-height: 260px; border: 0; border-radius: 10px; }
+
+  /* Gabarito, nota e correção manual */
+  .setup input { height: 48px; padding: 0 12px; border-radius: 12px; border: 1px solid #34425a; background: #0f1a2e; color: var(--ink); font-size: 1rem; letter-spacing: .12em; text-transform: uppercase; }
+  .setup input:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+  .keyerr { margin: -8px 0 0; min-height: 1em; font-size: .8rem; color: var(--err); }
+  .score { grid-column: 1 / -1; display: grid; gap: 4px; padding: 12px 14px; border-radius: 12px; background: #0f1a2e; border: 1px solid #34425a; }
+  .score strong { font-size: 1.5rem; }
+  .score span { color: var(--muted); font-size: .85rem; }
+  .note { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: .8rem; }
+  .kv { font-size: .8rem; margin-bottom: 4px; }
+  .kv.certa { color: var(--ok); }
+  .kv.errada { color: var(--err); }
+  .kv.branca, .kv.anulada { color: var(--gray); }
+  .foot { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+  .tag { margin-right: auto; font-size: .75rem; color: var(--muted); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .chip { appearance: none; height: 40px; min-width: 40px; padding: 0 14px; border-radius: 20px; border: 1px solid #34425a; background: transparent; color: var(--ink); font-size: .9rem; cursor: pointer; }
+  .chip.on { background: var(--mark); border-color: var(--mark); color: #05101f; font-weight: 700; }
+  .chip:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+  .tplinfo { margin: -8px 0 0; font-size: .8rem; color: var(--muted); line-height: 1.4; }
+  .qn { display: inline-flex; align-items: center; gap: 8px; }
+  .zone { padding: 2px 8px; border-radius: 999px; font-size: .7rem; font-weight: 600; border: 1px solid; }
+  .zone.aluno { color: #4da3ff; background: rgba(77, 163, 255, .12); }
+  .zone.prof { color: #c79bff; background: rgba(199, 155, 255, .12); }
+  .import { border: 1px solid #34425a; border-radius: 12px; padding: 0 12px; }
+  .import summary { cursor: pointer; padding: 12px 0; font-size: .9rem; }
+  .import summary:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+  .import[open] summary { border-bottom: 1px solid #34425a; margin-bottom: 12px; }
+  .import .help { margin: 0 0 10px; font-size: .78rem; line-height: 1.4; color: var(--muted); }
+  .import textarea { width: 100%; min-height: 160px; resize: vertical; padding: 10px; border-radius: 10px; border: 1px solid #34425a; background: #0f1a2e; color: var(--ink); font: .75rem/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .import textarea:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+  .import > .btn2 { margin: 10px 0 8px; }
+  .tplmsg { margin: 0 0 12px; min-height: 1em; font-size: .8rem; line-height: 1.4; }
+  .tplmsg.err { color: var(--err); }
+  .tplmsg.ok { color: var(--ok); }
+  .setup h1 { margin: 0; font-size: 1.3rem; }
+  .setup label { display: grid; gap: 6px; color: var(--muted); font-size: .9rem; }
+  .setup select { height: 48px; padding: 0 12px; border-radius: 12px; border: 1px solid #34425a; background: #0f1a2e; color: var(--ink); font-size: 1rem; }
+  .setup .primary { height: 52px; border: 0; border-radius: 26px; background: var(--mark); color: #05101f; font-size: 1.05rem; font-weight: 700; cursor: pointer; }
+  .setup select:focus-visible, .setup .primary:focus-visible, .btn2:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+
+  @media (prefers-reduced-motion: reduce) { .status.loading .dot { animation: none; } }
+</style>
+</head>
+<body>
+<main class="app">
+  <video id="video" playsinline muted autoplay></video>
+  <canvas id="canvas"></canvas>
+
+  <div class="overlay" aria-hidden="true">
+    <div class="frame">
+      <span class="corner tl"></span><span class="corner tr"></span>
+      <span class="corner bl"></span><span class="corner br"></span>
+    </div>
+  </div>
+
+  <div class="top">
+    <p class="hint">Alinhe os 4 cantos do cartão com as marcações</p>
+    <span id="status" class="status loading" role="status"><span class="dot"></span><span id="statusText">Carregando OpenCV…</span></span>
+  </div>
+
+  <div class="bottom">
+    <button id="reconfig" class="btn2 small" type="button"></button>
+    <button id="scan" type="button" disabled>Escanear</button>
+  </div>
+
+  <section id="setup" class="setup" aria-labelledby="setupTitle">
+    <div class="box">
+      <h1 id="setupTitle">Configurar cartão</h1>
+      <label>Selecione a Avaliação
+        <select id="selT"></select>
+      </label>
+      <p id="tplInfo" class="tplinfo"></p>
+      <button id="tplDel" class="btn2 small" type="button" hidden>Remover este template salvo</button>
+      <details class="import">
+        <summary>Adicionar Template Personalizado (JSON)</summary>
+        <p class="help">Campos: <b>nome</b>, <b>alternativas</b> (2 a 5) e <b>zonas</b>. Cada zona tem <b>questoes</b> (lista de números, de 1 a N sem lacunas) e, opcionalmente, <b>area</b> {left, right, top, bottom} em frações de 0 a 1. As zonas "aluno" e "prof" têm área padrão.</p>
+        <textarea id="tplJson" spellcheck="false" aria-label="JSON do template" placeholder='{&#10;  "nome": "Minha Prova",&#10;  "alternativas": 4,&#10;  "zonas": {&#10;    "aluno": { "questoes": [1, 2, 3, 4, 5] },&#10;    "prof": { "questoes": [6, 7] }&#10;  }&#10;}'></textarea>
+        <button id="tplLoad" class="btn2" type="button">Carregar Template</button>
+        <p id="tplMsg" class="tplmsg" role="alert"></p>
+      </details>
+      <label>Gabarito (opcional)
+        <input id="keyIn" type="text" autocapitalize="characters" autocomplete="off" spellcheck="false" placeholder="ex.: ABCDABCDAB">
+      </label>
+      <p id="keyErr" class="keyerr" role="alert"></p>
+      <button id="start" type="button" class="primary">Começar</button>
+    </div>
+  </section>
+
+  <section id="msg" class="msg" role="alert">
+    <h1 id="msgTitle">Câmera indisponível</h1>
+    <p id="msgText"></p>
+    <button id="retry" class="btn2" type="button">Tentar de novo</button>
+  </section>
+
+  <section id="preview" class="preview">
+    <img id="previewImg" alt="Imagem capturada do cartão-resposta">
+    <div id="report" class="report" aria-live="polite">
+      <div id="cards" class="cards"></div>
+      <ol id="rows" class="rows"></ol>
+      <details class="raw"><summary>JSON da leitura</summary><pre id="result" class="result"></pre></details>
+    </div>
+    <div class="bar">
+      <button id="again" class="btn2" type="button">Escanear de novo</button>
+    </div>
+  </section>
+</main>
+
+<script>
+(() => {
+  'use strict';
+
+  // OpenCV.js (build npm com WASM embutido, via jsDelivr). Em hospedagem própria,
+  // você também pode usar https://docs.opencv.org/4.x/opencv.js
+  const OPENCV_URL = 'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.9.0-release.2/dist/opencv.js';
+
+  const $ = id => document.getElementById(id);
+  const video = $('video'), canvas = $('canvas'), scanBtn = $('scan');
+  const statusEl = $('status'), statusText = $('statusText');
+  const state = { stream: null, cvReady: false, camReady: false, configured: false, key: null, openQ: null, baseJson: {}, template: null };
+
+  function setStatus(kind, text) {
+    statusEl.className = 'status ' + kind;
+    statusText.textContent = text;
+  }
+  function refreshButton() { scanBtn.disabled = !(state.cvReady && state.camReady && state.configured); }
+
+  /* ---------- OpenCV.js: carregamento assíncrono ---------- */
+  function loadOpenCV() {
+    const s = document.createElement('script');
+    s.async = true;
+    s.src = OPENCV_URL;
+    s.onerror = () => setStatus('error', 'Falha ao carregar OpenCV');
+    s.onload = async () => {
+      try {
+        let cvObj = window.cv;
+        if (cvObj && typeof cvObj.then === 'function') {      // algumas builds exportam uma Promise
+          cvObj = await cvObj; window.cv = cvObj;
+        } else if (cvObj && !cvObj.Mat) {                     // runtime WASM ainda inicializando
+          await new Promise(res => { cvObj.onRuntimeInitialized = res; });
+        }
+        state.cvReady = true;
+        setStatus('ready', 'OpenCV pronto');
+        refreshButton();
+      } catch (e) {
+        console.error(e);
+        setStatus('error', 'Erro ao iniciar OpenCV');
+      }
+    };
+    document.head.appendChild(s);
+  }
+
+  /* ---------- Câmera traseira em tela cheia ---------- */
+  async function startCamera() {
+    $('msg').classList.remove('show');
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      return showError('Este navegador não oferece acesso à câmera. Abra o app em HTTPS num navegador atual.');
+    }
+    try {
+      stopCamera();
+      state.stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: { ideal: 'environment' },   // câmera traseira
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
+        }
+      });
+      video.srcObject = state.stream;
+      await video.play();
+      state.camReady = true;
+      refreshButton();
+    } catch (err) {
+      const denied = err.name === 'NotAllowedError' || err.name === 'SecurityError';
+      showError(denied
+        ? 'Permita o acesso à câmera nas configurações do navegador e tente de novo.'
+        : 'Não foi possível abrir a câmera traseira (' + err.name + ').');
+    }
+  }
+  function stopCamera() {
+    if (state.stream) state.stream.getTracks().forEach(t => t.stop());
+    state.stream = null; state.camReady = false; refreshButton();
+  }
+  function showError(text) {
+    $('msgText').textContent = text;
+    $('msg').classList.add('show');
+  }
+
+  /* ---------- Captura e recorte da área do overlay ---------- */
+  function captureFrame() {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const box = document.querySelector('.frame').getBoundingClientRect();
+    const view = video.getBoundingClientRect();
+
+    // object-fit: cover → converte coordenadas da tela para pixels do vídeo
+    const scale = Math.max(view.width / vw, view.height / vh);
+    const offX = (vw * scale - view.width) / 2;
+    const offY = (vh * scale - view.height) / 2;
+    const sx = Math.max(0, (box.left - view.left + offX) / scale);
+    const sy = Math.max(0, (box.top - view.top + offY) / scale);
+    const sw = Math.min(vw - sx, box.width / scale);
+    const sh = Math.min(vh - sy, box.height / scale);
+
+    canvas.width = Math.round(sw);
+    canvas.height = Math.round(sh);
+    canvas.getContext('2d').drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+    return canvas;
+  }
+
+  /* ---------- Pipeline de leitura (OpenCV.js) ---------- */
+  // Cartão endireitado (proporção A4) e layout do grid, em frações da imagem endireitada.
+  // Ajuste GRID para casar com o seu modelo de cartão impresso.
+  const WARP_W = 600, WARP_H = 849;
+  const GRID = {
+    // template, zonas e áreas (left/right/top/bottom) vêm de templatesAvaliacoes e zonasCartao
+    bubbleRatio: 0.32,               // raio da bolha (fração do menor lado da célula)
+    inner: 0.7,                  // só o miolo da bolha é lido (ignora o contorno impresso)
+    ambiguityThreshold: 0.15,    // dupla marcação se (maior - segundo maior) <= isto, em pontos percentuais
+    blankMin: 0.20               // abaixo disso a questão é considerada em branco
+  };
+
+  // Mapas das provas (templates). questoesAluno: objetivas marcadas pelo aluno;
+  // questoesProfessor: respostas construídas marcadas pelo professor; alternativas: 4 (A–D) ou 5 (A–E).
+  const seq = (a, b) => Array.from({ length: b - a + 1 }, (_, i) => a + i);
+  const templatesAvaliacoes = {
+    saec3: {
+      nome: 'SAEC - 3º Ano',
+      questoesAluno: [1, 2, 3, 4, 5, 9, 10, 11],
+      questoesProfessor: [6, 7, 8, 12, 13],
+      alternativas: 4
+    },
+    obj10: { nome: 'Objetiva - 10 questões (A–D)', questoesAluno: seq(1, 10), questoesProfessor: [], alternativas: 4 },
+    obj20: { nome: 'Objetiva - 20 questões (A–D)', questoesAluno: seq(1, 20), questoesProfessor: [], alternativas: 4 },
+    obj25e: { nome: 'Objetiva - 25 questões (A–E)', questoesAluno: seq(1, 25), questoesProfessor: [], alternativas: 5 }
+  };
+
+  // Onde cada zona (grid) fica no cartão endireitado, em frações da largura/altura.
+  // Ajuste ao seu cartão impresso. "alunoUnica" vale quando a prova não tem zona do professor.
+  const zonasCartao = {
+    aluno: { rotulo: 'Área do Aluno', tag: 'aluno', area: { left: 0.30, right: 0.80, top: 0.18, bottom: 0.58 } },
+    prof: { rotulo: 'Área do Professor', tag: 'prof.', area: { left: 0.30, right: 0.80, top: 0.66, bottom: 0.92 } },
+    alunoUnica: { left: 0.30, right: 0.80, top: 0.22, bottom: 0.90 }
+  };
+
+  // Converte o template escolhido nas zonas (grids) usadas na leitura e na interface
+  function resolverTemplate(id) {
+    const t = templatesAvaliacoes[id];
+    if (t.zonas) {   // template importado com zonas e áreas próprias
+      const zonas = {};
+      for (const [k, z] of Object.entries(t.zonas)) {
+        const base = zonasCartao[k] || {};
+        zonas[k] = { rotulo: String(z.rotulo || base.rotulo || k), tag: String(z.tag || base.tag || k), area: z.area || base.area, questoes: z.questoes };
+      }
+      return { id, nome: t.nome, alternativas: t.alternativas, zonas };
+    }
+    const temProf = t.questoesProfessor.length > 0;
+    const zonas = {};
+    if (t.questoesAluno.length) {
+      zonas.aluno = {
+        ...zonasCartao.aluno,
+        area: temProf ? zonasCartao.aluno.area : zonasCartao.alunoUnica,
+        questoes: t.questoesAluno
+      };
+    }
+    if (temProf) zonas.prof = { ...zonasCartao.prof, questoes: t.questoesProfessor };
+    return { id, nome: t.nome, alternativas: t.alternativas, zonas };
+  }
+  const expandRanges = qs => [...qs].sort((a, b) => a - b);
+
+  // Ordena: superior-esquerdo, superior-direito, inferior-direito, inferior-esquerdo
+  function orderPoints(p) {
+    const sum = p.map(q => q.x + q.y), diff = p.map(q => q.y - q.x);
+    return [
+      p[sum.indexOf(Math.min(...sum))],   // TL
+      p[diff.indexOf(Math.min(...diff))], // TR
+      p[sum.indexOf(Math.max(...sum))],   // BR
+      p[diff.indexOf(Math.max(...diff))]  // BL
+    ];
+  }
+
+  // Feedback visual no canvas do cartão endireitado
+  function drawFeedback(cnvEl, rows, g) {
+    const ctx = cnvEl.getContext('2d');
+    ctx.lineJoin = 'round';
+
+    // Tracejado: área de cada zona (grid) do template
+    Object.values(g.zonas).forEach(z => {
+      const a = z.area, zx = a.left * WARP_W, zy = a.top * WARP_H;
+      ctx.setLineDash([6, 4]);
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = 'rgba(255,255,255,.55)';
+      ctx.strokeRect(zx, zy, (a.right - a.left) * WARP_W, (a.bottom - a.top) * WARP_H);
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(255,255,255,.85)';
+      ctx.font = '14px system-ui, sans-serif';
+      ctx.fillText(z.rotulo, zx + 2, Math.max(14, zy - 6));
+    });
+
+    // Verde: os 4 cantos do cartão (vértices detectados)
+    const m = 36;
+    ctx.lineWidth = 5;
+    ctx.strokeStyle = '#5fd39a';
+    [[0, 0], [WARP_W, 0], [WARP_W, WARP_H], [0, WARP_H]].forEach(([x, y]) => {
+      ctx.strokeRect(x === 0 ? 3 : x - 3 - m, y === 0 ? 3 : y - 3 - m, m, m);
+    });
+
+    // Azul: bolhas preenchidas (laranja se a questão foi DUPLA); cinza fino: demais bolhas
+    rows.forEach(row => {
+      const cy = row.geo.cy;
+      row.fill.forEach((_, c) => {
+        const cx = row.geo.x0 + (c + 0.5) * row.geo.colW;
+        const hot = row.hot.includes(c);
+        ctx.beginPath();
+        ctx.arc(cx, cy, row.geo.r, 0, Math.PI * 2);
+        ctx.lineWidth = hot ? 3 : 1;
+        ctx.strokeStyle = hot ? (row.status === 'dupla' ? '#ffaa3c' : '#4da3ff') : 'rgba(160,160,160,.55)';
+        ctx.stroke();
+      });
+    });
+  }
+
+  function processAnswerSheet(cnv) {
+    const mats = [];
+    const track = m => (mats.push(m), m);
+    try {
+      const src = track(cv.imread(cnv));
+      const gray = track(new cv.Mat());
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+
+      // 1) Filtro e bordas
+      const blur = track(new cv.Mat());
+      cv.GaussianBlur(gray, blur, new cv.Size(5, 5), 0);
+      const edges = track(new cv.Mat());
+      cv.Canny(blur, edges, 50, 150);
+      const kernel = track(cv.Mat.ones(3, 3, cv.CV_8U));
+      cv.dilate(edges, edges, kernel);               // fecha pequenas falhas nas bordas
+
+      // 2) Maior contorno com exatamente 4 vértices
+      const contours = track(new cv.MatVector());
+      const hier = track(new cv.Mat());
+      cv.findContours(edges, contours, hier, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+      const minArea = cnv.width * cnv.height * 0.2;
+      let bestArea = 0, quad = null;
+      for (let i = 0; i < contours.size(); i++) {
+        const cnt = contours.get(i);
+        const area = cv.contourArea(cnt);
+        if (area > bestArea && area >= minArea) {
+          const approx = new cv.Mat();
+          cv.approxPolyDP(cnt, approx, 0.02 * cv.arcLength(cnt, true), true);
+          if (approx.rows === 4 && cv.isContourConvex(approx)) {
+            const d = approx.data32S;
+            quad = [0, 1, 2, 3].map(k => ({ x: d[k * 2], y: d[k * 2 + 1] }));
+            bestArea = area;
+          }
+          approx.delete();
+        }
+        cnt.delete();
+      }
+      if (!quad) return { ok: false, error: 'Cartão não detectado. Mostre os 4 cantos da folha, em fundo contrastante e boa luz.' };
+
+      // 3) Perspectiva: ordena os vértices e planifica
+      const o = orderPoints(quad);
+      const srcTri = track(cv.matFromArray(4, 1, cv.CV_32FC2, o.flatMap(q => [q.x, q.y])));
+      const dstTri = track(cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, WARP_W, 0, WARP_W, WARP_H, 0, WARP_H]));
+      const M = track(cv.getPerspectiveTransform(srcTri, dstTri));
+      const warped = track(new cv.Mat());
+      cv.warpPerspective(gray, warped, M, new cv.Size(WARP_W, WARP_H), cv.INTER_LINEAR, cv.BORDER_REPLICATE);
+
+      // 4) Binarização (Otsu, invertida): papel → preto, grafite/tinta → branco
+      const wBlur = track(new cv.Mat());
+      cv.GaussianBlur(warped, wBlur, new cv.Size(5, 5), 0);
+      const bin = track(new cv.Mat());
+      cv.threshold(wBlur, bin, 0, 255, cv.THRESH_BINARY_INV | cv.THRESH_OTSU);
+
+      // Imagem de conferência (cartão endireitado + bolhas lidas)
+      const vis = track(new cv.Mat());
+      cv.cvtColor(warped, vis, cv.COLOR_GRAY2RGBA);
+
+      // 5) Leitura do grid: conta pixels brancos no miolo de cada bolha
+      const tpl = state.template;
+      const nOpt = tpl.alternativas;
+      const letters = Array.from({ length: nOpt }, (_, i) => String.fromCharCode(65 + i));
+      // Uma entrada por questão, com a geometria da zona (grid) a que ela pertence
+      const slots = [];
+      for (const [zname, z] of Object.entries(tpl.zonas)) {
+        const qs = expandRanges(z.questoes);
+        if (!qs.length) continue;
+        const a = z.area;
+        const colW = (a.right - a.left) * WARP_W / nOpt;
+        const rowH = (a.bottom - a.top) * WARP_H / qs.length;
+        const r = Math.min(colW, rowH) * GRID.bubbleRatio;
+        qs.forEach((qn, i) => slots.push({
+          q: qn, zona: zname, r, colW,
+          x0: a.left * WARP_W, cy: a.top * WARP_H + (i + 0.5) * rowH,
+          half: Math.max(2, Math.round(r * GRID.inner))
+        }));
+      }
+      slots.sort((p, s) => p.q - s.q);
+      const nQ = slots.length;
+      const answers = {}, fill = {}, views = [];
+
+      for (const s of slots) {
+        const { q: qn, cy, x0, colW, half } = s;
+        const ratios = Array.from({ length: nOpt }, (_, c) => {
+          const cx = x0 + (c + 0.5) * colW;
+          const rect = new cv.Rect(Math.round(cx - half), Math.round(cy - half), half * 2, half * 2);
+          const roi = bin.roi(rect);
+          const ratio = cv.countNonZero(roi) / (rect.width * rect.height);
+          roi.delete();
+          return ratio;
+        });
+        // Maior e segundo maior preenchimento da linha
+        const ranked = ratios.map((v, c) => [v, c]).sort((a, b) => b[0] - a[0]);
+        const highest = ranked[0][0], idx = ranked[0][1];
+        const secondHighest = ranked[1][0], idx2 = ranked[1][1];
+        const marked = highest >= GRID.blankMin;
+        const ambiguous = marked && secondHighest >= GRID.blankMin &&
+          (highest - secondHighest) <= GRID.ambiguityThreshold;
+        answers[qn] = !marked ? null : ambiguous ? 'DUPLA' : letters[idx];
+        fill[qn] = ratios.map(v => +v.toFixed(2));
+
+        views.push({
+          q: qn, zona: s.zona, zonaTag: tpl.zonas[s.zona].tag,
+          geo: { x0, cy, colW, r: s.r },
+          answer: answers[qn],
+          status: !marked ? 'branco' : ambiguous ? 'dupla' : 'clara',
+          fill: ratios, hot: !marked ? [] : ambiguous ? [idx, idx2] : [idx]
+        });
+      }
+
+      const tmp = document.createElement('canvas');
+      cv.imshow(tmp, vis);
+      drawFeedback(tmp, views, tpl);
+      return { ok: true, config: { template: tpl.id, questoes: nQ, alternativas: nOpt }, zonas: Object.fromEntries(slots.map(s => [s.q, s.zona])), answers, fill, view: { rows: views, letters }, debugUrl: tmp.toDataURL('image/jpeg', 0.85) };
+    } finally {
+      mats.forEach(m => { try { m.delete(); } catch (_) {} });
+    }
+  }
+
+  /* ---------- Relatório de auditoria ---------- */
+  const el = (tag, cls, text) => {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  };
+
+  function renderReport(res) {
+    const cards = $('cards'), list = $('rows');
+    cards.textContent = ''; list.textContent = '';
+    if (!res.ok) { cards.append(el('p', 'errbox', res.error)); return; }
+
+    const { rows, letters } = res.view;
+    const key = state.key;   // gabarito oficial (string) ou null
+    const eff = r => (r.manual === undefined ? r.status : (r.manual === null ? 'branco' : 'clara'));
+    const finalAns = r => (r.manual === undefined ? r.answer : r.manual);
+    const nManual = rows.filter(r => r.manual !== undefined).length;
+    const verdict = r => {
+      const fa = finalAns(r);
+      return fa === 'DUPLA' ? 'anulada' : fa === null ? 'branca' : fa === key[r.q - 1] ? 'certa' : 'errada';
+    };
+    const tally = { certa: 0, errada: 0, branca: 0, anulada: 0 };
+    if (key) rows.forEach(r => { tally[verdict(r)]++; });
+    const count = s => rows.filter(r => eff(r) === s).length;
+    [['clara', 'Lidas com clareza'], ['dupla', 'Em dúvida / dupla'], ['branco', 'Em branco']].forEach(([k, label]) => {
+      const c = el('div', 'card ' + k);
+      c.append(el('strong', '', String(count(k))), el('span', '', label));
+      cards.append(c);
+    });
+
+    if (key) {
+      const nota = (tally.certa / rows.length) * 10;
+      const s = el('div', 'score');
+      s.append(
+        el('strong', '', 'Nota ' + nota.toFixed(1).replace('.', ',') + ' de 10'),
+        el('span', '', tally.certa + ' certas, ' + tally.errada + ' erradas, ' + tally.branca + ' em branco, ' + tally.anulada + ' anuladas (valem zero)')
+      );
+      cards.append(s);
+    }
+    if (nManual) cards.append(el('p', 'note', nManual + (nManual === 1 ? ' questão corrigida manualmente' : ' questões corrigidas manualmente')));
+
+    rows.forEach(r => {
+      const li = el('li', 'row ' + eff(r));
+      const fa = finalAns(r);
+      const head = el('div', 'qhead');
+      const qn = el('span', 'qn', 'Q' + String(r.q).padStart(2, '0'));
+      qn.append(el('span', 'zone ' + r.zona, r.zonaTag));
+      head.append(qn, el('span', 'qa', fa === null ? 'Em branco' : fa));
+      li.append(head);
+      if (key) {
+        const v = verdict(r);
+        const txt = { certa: 'certa', errada: 'errada', branca: 'em branco', anulada: 'anulada' }[v];
+        li.append(el('div', 'kv ' + v, 'Gabarito ' + key[r.q - 1] + ': ' + txt));
+      }
+      r.fill.forEach((v, c) => {
+        const pct = Math.min(100, Math.round(v * 100));
+        const row = el('div', 'brow');
+        const track = el('div', 'track');
+        track.style.setProperty('--min', (GRID.blankMin * 100) + '%');
+        const bar = el('div', 'fillbar' + (r.hot.includes(c) ? (r.status === 'dupla' ? ' warn' : ' win') : ''));
+        bar.style.width = pct + '%';
+        track.append(bar);
+        row.append(el('span', '', letters[c]), track, el('span', 'pct', pct + '%'));
+        li.append(row);
+      });
+      const foot = el('div', 'foot');
+      if (r.manual !== undefined) foot.append(el('span', 'tag', 'corrigida manualmente'));
+      const edit = el('button', 'btn2 small', state.openQ === r.q ? 'Fechar' : 'Corrigir');
+      edit.type = 'button';
+      edit.addEventListener('click', () => { state.openQ = state.openQ === r.q ? null : r.q; renderReport(res); });
+      foot.append(edit);
+      li.append(foot);
+      if (state.openQ === r.q) {
+        const chips = el('div', 'chips');
+        [...letters, null].forEach(opt => {
+          const b = el('button', 'chip' + (finalAns(r) === opt ? ' on' : ''), opt === null ? 'Em branco' : opt);
+          b.type = 'button';
+          b.addEventListener('click', () => { r.manual = opt; renderReport(res); });
+          chips.append(b);
+        });
+        if (r.manual !== undefined) {
+          const undo = el('button', 'chip', 'Desfazer');
+          undo.type = 'button';
+          undo.addEventListener('click', () => { delete r.manual; renderReport(res); });
+          chips.append(undo);
+        }
+        li.append(chips);
+      }
+      list.append(li);
+    });
+
+    // JSON: leitura original + respostas finais e correção (quando houver)
+    const out = { ...state.baseJson };
+    if (nManual) out.final = Object.fromEntries(rows.map(r => [r.q, finalAns(r)]));
+    if (key) {
+      out.correcao = {
+        gabarito: key, certas: tally.certa, erradas: tally.errada, em_branco: tally.branca,
+        anuladas: tally.anulada, nota: +((tally.certa / rows.length) * 10).toFixed(1)
+      };
+    }
+    $('result').textContent = JSON.stringify(out, null, 2);
+  }
+
+  scanBtn.addEventListener('click', () => {
+    const cnv = captureFrame();
+    let result;
+    try {
+      result = processAnswerSheet(cnv);
+    } catch (e) {
+      console.error(e);
+      result = { ok: false, error: 'Erro ao processar a imagem: ' + ((e && e.message) || e) };
+    }
+    const { debugUrl, view, ...json } = result;
+    $('previewImg').src = debugUrl || cnv.toDataURL('image/jpeg', 0.9);
+    state.baseJson = json; state.openQ = null;
+    $('result').textContent = JSON.stringify(json, null, 2);
+    renderReport(result);
+    $('preview').classList.add('show');
+    $('preview').scrollTop = 0;
+  });
+  $('again').addEventListener('click', () => $('preview').classList.remove('show'));
+  $('retry').addEventListener('click', startCamera);
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stopCamera(); else if (!$('preview').classList.contains('show')) startCamera();
+  });
+
+  /* ---------- Setup inicial: escolha da avaliação (template) ---------- */
+  const setup = $('setup'), selT = $('selT'), tplInfo = $('tplInfo'), reconfig = $('reconfig');
+  const pickTemplate = resolverTemplate;
+  const totalQ = t => Object.values(t.zonas).reduce((n, z) => n + expandRanges(z.questoes).length, 0);
+  const qLabel = n => 'Q' + String(n).padStart(2, '0');
+  // Agrupa números consecutivos em faixas: [1,2,3,5] -> "Q01–Q03, Q05"
+  const rangesText = ns => {
+    const s = [...ns].sort((a, b) => a - b), out = [];
+    for (let i = 0; i < s.length;) {
+      let j = i;
+      while (j + 1 < s.length && s[j + 1] === s[j] + 1) j++;
+      out.push(j === i ? qLabel(s[i]) : qLabel(s[i]) + '–' + qLabel(s[j]));
+      i = j + 1;
+    }
+    return out.join(', ');
+  };
+
+  // ----- Templates personalizados: validação, localStorage e menu -----
+  const STORAGE_KEY = 'leitorCartao.templatesPersonalizados';
+  const idsNativos = new Set(Object.keys(templatesAvaliacoes));
+  const listaOk = v => Array.isArray(v) && v.every(n => Number.isInteger(n) && n >= 1);
+
+  function lerSalvos() {
+    try {
+      const obj = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+      return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : {};
+    } catch (_) { return {}; }
+  }
+  function gravarSalvos(obj) {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(obj)); return true; } catch (_) { return false; }
+  }
+
+  // Retorna uma mensagem de erro (string) ou null se o template for válido
+  function validarTemplate(t) {
+    if (!t || typeof t !== 'object' || Array.isArray(t)) return 'o JSON deve ser um objeto { nome, alternativas, zonas }.';
+    if (typeof t.nome !== 'string' || !t.nome.trim()) return 'campo "nome" ausente ou vazio.';
+    if (!Number.isInteger(t.alternativas) || t.alternativas < 2 || t.alternativas > 5) return 'campo "alternativas" deve ser um inteiro de 2 a 5 (4 = A–D, 5 = A–E).';
+    const grupos = [];
+    if (t.zonas !== undefined) {
+      if (!t.zonas || typeof t.zonas !== 'object' || Array.isArray(t.zonas) || !Object.keys(t.zonas).length) return 'campo "zonas" deve ser um objeto com ao menos uma zona.';
+      for (const [k, z] of Object.entries(t.zonas)) {
+        if (!z || typeof z !== 'object' || Array.isArray(z)) return 'a zona "' + k + '" deve ser um objeto.';
+        if (!listaOk(z.questoes)) return 'zonas.' + k + '.questoes deve ser uma lista de números inteiros positivos.';
+        grupos.push(z.questoes);
+        if (z.area === undefined) {
+          if (!zonasCartao[k] || !zonasCartao[k].area) return 'a zona "' + k + '" precisa de "area" { left, right, top, bottom }.';
+        } else {
+          const a = z.area;
+          const ok = a && ['left', 'right', 'top', 'bottom'].every(p => typeof a[p] === 'number' && a[p] >= 0 && a[p] <= 1) && a.left < a.right && a.top < a.bottom;
+          if (!ok) return 'zonas.' + k + '.area precisa de left < right e top < bottom, com valores entre 0 e 1.';
+        }
+      }
+    } else if (t.questoesAluno !== undefined || t.questoesProfessor !== undefined) {
+      for (const campo of ['questoesAluno', 'questoesProfessor']) {
+        const v = t[campo] === undefined ? [] : t[campo];
+        if (!listaOk(v)) return 'campo "' + campo + '" deve ser uma lista de números inteiros positivos.';
+        grupos.push(v);
+      }
+    } else {
+      return 'informe o campo "zonas" (ou "questoesAluno" / "questoesProfessor").';
+    }
+    const todas = grupos.flat();
+    if (!todas.length) return 'nenhuma questão definida.';
+    if (todas.length > 60) return 'máximo de 60 questões por template.';
+    if (new Set(todas).size !== todas.length) return 'há números de questão repetidos entre as zonas.';
+    const maior = Math.max(...todas);
+    if (maior !== todas.length) return 'as questões devem ir de 1 a N sem lacunas (maior número: ' + maior + ', total: ' + todas.length + ').';
+    return null;
+  }
+
+  function normalizar(o) {
+    const base = { nome: o.nome.trim(), alternativas: o.alternativas };
+    if (o.zonas) {
+      base.zonas = {};
+      for (const [k, z] of Object.entries(o.zonas)) {
+        const n = { questoes: z.questoes.slice() };
+        if (z.rotulo) n.rotulo = String(z.rotulo);
+        if (z.tag) n.tag = String(z.tag);
+        if (z.area) n.area = { left: z.area.left, right: z.area.right, top: z.area.top, bottom: z.area.bottom };
+        base.zonas[k] = n;
+      }
+    } else {
+      base.questoesAluno = (o.questoesAluno || []).slice();
+      base.questoesProfessor = (o.questoesProfessor || []).slice();
+    }
+    return base;
+  }
+
+  const slug = s => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'prova';
+
+  // Mescla os templates salvos (válidos) com os nativos
+  Object.entries(lerSalvos()).forEach(([id, t]) => {
+    if (!idsNativos.has(id) && !validarTemplate(t)) templatesAvaliacoes[id] = t;
+  });
+
+  function montarMenu(selecionado) {
+    selT.textContent = '';
+    Object.entries(templatesAvaliacoes).forEach(([id, t]) => {
+      selT.append(new Option(t.nome + (idsNativos.has(id) ? '' : ' (personalizada)'), id));
+    });
+    if (selecionado) selT.value = selecionado;
+  }
+  montarMenu();
+
+  const tplMsg = $('tplMsg'), tplDel = $('tplDel');
+  const avisoTpl = (tipo, texto) => { tplMsg.className = 'tplmsg ' + tipo; tplMsg.textContent = texto; };
+  function atualizarDel() { tplDel.hidden = idsNativos.has(selT.value); }
+
+  $('tplLoad').addEventListener('click', () => {
+    let obj;
+    try { obj = JSON.parse($('tplJson').value); }
+    catch (e) { return avisoTpl('err', 'Erro de sintaxe no JSON: ' + e.message); }
+    const erro = validarTemplate(obj);
+    if (erro) return avisoTpl('err', 'Estrutura inválida: ' + erro);
+    const id = 'custom_' + slug(obj.nome);
+    const t = normalizar(obj);
+    templatesAvaliacoes[id] = t;
+    const salvos = lerSalvos();
+    salvos[id] = t;
+    const gravou = gravarSalvos(salvos);
+    montarMenu(id);
+    showInfo();
+    atualizarDel();
+    $('tplJson').value = '';
+    avisoTpl(gravou ? 'ok' : 'err', gravou
+      ? 'Template "' + t.nome + '" carregado e salvo neste aparelho.'
+      : 'Template carregado, mas o navegador não permitiu salvar: ele some ao recarregar a página.');
+  });
+
+  tplDel.addEventListener('click', () => {
+    const id = selT.value;
+    if (idsNativos.has(id)) return;
+    delete templatesAvaliacoes[id];
+    const salvos = lerSalvos();
+    delete salvos[id];
+    gravarSalvos(salvos);
+    montarMenu();
+    showInfo();
+    atualizarDel();
+    avisoTpl('ok', 'Template removido.');
+  });
+  function showInfo() {
+    const t = resolverTemplate(selT.value);
+    tplInfo.textContent = totalQ(t) + ' questões, A–' + String.fromCharCode(64 + t.alternativas) + '. ' +
+      Object.values(t.zonas).map(z => z.rotulo + ': ' + rangesText(z.questoes)).join('. ') + '.';
+  }
+  selT.addEventListener('change', () => { showInfo(); atualizarDel(); });
+  state.template = pickTemplate(selT.value);
+
+  function updateChip() { reconfig.textContent = state.template.nome + ' (ajustar)'; }
+  $('start').addEventListener('click', () => {
+    const t = pickTemplate(selT.value);
+    const nq = totalQ(t);
+    const raw = $('keyIn').value.toUpperCase().replace(/[^A-Z]/g, '');
+    const allowed = 'ABCDE'.slice(0, t.alternativas);
+    if (raw && (raw.length !== nq || [...raw].some(ch => !allowed.includes(ch)))) {
+      $('keyErr').textContent = 'O gabarito deve ter ' + nq + ' letras (Q01 a ' + qLabel(nq) + '), de A a ' + allowed[allowed.length - 1] + ' (digitadas: ' + raw.length + ').';
+      return;
+    }
+    $('keyErr').textContent = '';
+    state.key = raw || null;
+    state.template = t;
+    state.configured = true;
+    setup.classList.remove('show');
+    updateChip();
+    refreshButton();
+  });
+  reconfig.addEventListener('click', () => {
+    if (templatesAvaliacoes[state.template.id]) selT.value = state.template.id;
+    showInfo();
+    setup.classList.add('show');
+  });
+  showInfo();
+  atualizarDel();
+  updateChip();
+  setup.classList.add('show');
+
+  loadOpenCV();
+  startCamera();
+})();
+</script>
+</body>
+</html>
