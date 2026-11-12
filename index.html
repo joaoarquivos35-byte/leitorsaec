@@ -232,7 +232,7 @@
 
   // OpenCV.js (build npm com WASM embutido, via jsDelivr). Em hospedagem própria,
   // você também pode usar https://docs.opencv.org/4.x/opencv.js
-  const OPENCV_URL = 'https://cdn.jsdelivr.net/npm/@techstark/opencv-js@4.9.0-release.2/dist/opencv.js';
+  const OPENCV_URL = '[https://docs.opencv.org/4.x/opencv.js](https://docs.opencv.org/4.x/opencv.js)';
 
   const $ = id => document.getElementById(id);
   const video = $('video'), canvas = $('canvas'), scanBtn = $('scan');
@@ -246,25 +246,36 @@
   function refreshButton() { scanBtn.disabled = !(state.cvReady && state.camReady && state.configured); }
 
   /* ---------- OpenCV.js: carregamento assíncrono ---------- */
+  /* ---------- OpenCV.js: carregamento assíncrono ---------- */
   function loadOpenCV() {
     const s = document.createElement('script');
     s.async = true;
     s.src = OPENCV_URL;
     s.onerror = () => setStatus('error', 'Falha ao carregar OpenCV');
-    s.onload = async () => {
-      try {
-        let cvObj = window.cv;
-        if (cvObj && typeof cvObj.then === 'function') {      // algumas builds exportam uma Promise
-          cvObj = await cvObj; window.cv = cvObj;
-        } else if (cvObj && !cvObj.Mat) {                     // runtime WASM ainda inicializando
-          await new Promise(res => { cvObj.onRuntimeInitialized = res; });
-        }
+    s.onload = () => {
+      // Se a biblioteca expuser uma Promise global
+      if (window.cv && typeof window.cv.then === 'function') {
+        window.cv.then(cvObj => {
+          window.cv = cvObj;
+          state.cvReady = true;
+          setStatus('ready', 'OpenCV pronto');
+          refreshButton();
+        }).catch(err => {
+          console.error(err);
+          setStatus('error', 'Erro ao iniciar OpenCV');
+        });
+      // Se a biblioteca for iniciada via WebAssembly (padrão)
+      } else if (window.cv && window.cv.onRuntimeInitialized === undefined) {
+        window.cv.onRuntimeInitialized = () => {
+          state.cvReady = true;
+          setStatus('ready', 'OpenCV pronto');
+          refreshButton();
+        };
+      // Fallback para caso já esteja pronta no onload
+      } else {
         state.cvReady = true;
         setStatus('ready', 'OpenCV pronto');
         refreshButton();
-      } catch (e) {
-        console.error(e);
-        setStatus('error', 'Erro ao iniciar OpenCV');
       }
     };
     document.head.appendChild(s);
